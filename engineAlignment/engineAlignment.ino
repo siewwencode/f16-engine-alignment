@@ -89,6 +89,8 @@ void readWT61CPackets() {
       int16_t raw_az = (int16_t)((buf[7] << 8) | buf[6]);
 
       // Convert raw integers to units of 'g' (range is +/- 16g mapped over 32768)
+      // 32768 is 2¹⁵, the maximum positive range of a signed 16-bit integer
+      // 16.0 is the full-scale dynamic measurement range of the accelerometer (+/-16g)
       ax_raw = (float)raw_ax / 32768.0 * 16.0;
       ay_raw = (float)raw_ay / 32768.0 * 16.0;
       az_raw = (float)raw_az / 32768.0 * 16.0;
@@ -102,6 +104,8 @@ void readWT61CPackets() {
       int16_t raw_y = (int16_t)((buf[7] << 8) | buf[6]);
 
       // Convert raw integers to degrees (-180.0° to +180.0°)
+      // 32768 is 2¹⁵, the maximum positive range of a signed 16-bit integer
+      // 16.0 is the full-scale dynamic measurement range of the accelerometer (+/-180°)
       roll_deg  = (float)raw_r / 32768.0 * 180.0;
       pitch_deg = (float)raw_p / 32768.0 * 180.0;
       yaw_deg   = (float)raw_y / 32768.0 * 180.0;
@@ -126,6 +130,7 @@ void resetOdometer() {
 // ============================================================================
 void setup() {
   // Initialize USB communication to computer at 115200 baud
+  // Serial communication line transmits 115,200 signal changes (bits) per second
   Serial.begin(115200);
   
   // Initialize UART2 for WT61C communication at 115200 baud
@@ -206,6 +211,10 @@ void loop() {
   // --------------------------------------------------------------------------
   // Step 8: Print formatted results to Serial Monitor at 10 Hz (every 100 ms)
   // --------------------------------------------------------------------------
+  // pitch_deg: Current pitch angle in degrees, relative to horizontal ground
+  // linear_ax: Linear acceleration along the X-axis in m/s² (removing gravity component), if stationary will read 0.00
+  // velocity_x: Velocity along the X-axis in m/s,, estimated speed at this instant 
+  // position_x: Position along the X-axis in meters, cumulative distance traveled since startup/reset
   if (millis() - lastPrint > 100) {
     lastPrint = millis();
     Serial.printf("Pitch: %+5.1f° | AccelX: %+5.2f m/s² | VelX: %+5.2f m/s | DistX: %+6.3f m\n",
