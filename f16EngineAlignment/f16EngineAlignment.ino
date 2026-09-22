@@ -47,8 +47,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
   <h1>Engine Alignment Movement Monitor</h1>
   <div id="status" class="stationary">STATIONARY</div>
   <table>
-    <tr><td class="label">Offset from Origin</td><td id="pos">0.00 cm</td></tr>
-    <tr><td class="label">Total Travel</td><td id="dist">0.00 cm</td></tr>
+    <tr><td class="label">Offset (with gravity)</td><td id="posWithGravity">0.00 cm</td></tr>
+    <tr><td class="label">Total Travel (with gravity)</td><td id="distWithGravity">0.00 cm</td></tr>
+    <tr><td class="label">Offset (without gravity)</td><td id="posWithoutGravity">0.00 cm</td></tr>
+    <tr><td class="label">Total Travel (without gravity)</td><td id="distWithoutGravity">0.00 cm</td></tr>
+    <tr><td class="label">X Acceleration (with gravity)</td><td id="accelWithGravity">0.00 m/s²</td></tr>
+    <tr><td class="label">X Acceleration (without gravity)</td><td id="accelWithoutGravity">0.00 m/s²</td></tr>
   </table>
   <button id="resetBtn" onclick="resetOrigin()">Reset Origin</button>
   <div id="ip"></div>
@@ -72,8 +76,12 @@ async function poll() {
       el.textContent = 'STATIONARY';
       el.className = 'stationary';
     }
-    document.getElementById('pos').textContent = data.position_cm.toFixed(2) + ' cm';
-    document.getElementById('dist').textContent = data.distance_cm.toFixed(2) + ' cm';
+    document.getElementById('posWithGravity').textContent = data.position_with_gravity_cm.toFixed(2) + ' cm';
+    document.getElementById('distWithGravity').textContent = data.distance_with_gravity_cm.toFixed(2) + ' cm';
+    document.getElementById('posWithoutGravity').textContent = data.position_without_gravity_cm.toFixed(2) + ' cm';
+    document.getElementById('distWithoutGravity').textContent = data.distance_without_gravity_cm.toFixed(2) + ' cm';
+    document.getElementById('accelWithGravity').textContent = data.acceleration_with_gravity_mps2.toFixed(3) + ' m/s²';
+    document.getElementById('accelWithoutGravity').textContent = data.acceleration_without_gravity_mps2.toFixed(3) + ' m/s²';
   } catch (e) {
     // Ignore transient network errors between polls
   }
@@ -92,28 +100,25 @@ float ax_raw = 0.0;             // Raw X acceleration from sensor in 'g'
 float ay_raw = 0.0;             // Raw Y acceleration from sensor in 'g'
 float az_raw = 0.0;             // Raw Z acceleration from sensor in 'g'
 float ax_baseline_mps2 = 0.0;   // Static corrected X acceleration at origin
-float ay_baseline_mps2 = 0.0;   // Static corrected Y acceleration at origin
-float az_baseline_mps2 = 0.0;   // Static corrected Z acceleration at origin
 float gx_dps = 0.0;              // Angular velocity around X
 float gy_dps = 0.0;              // Angular velocity around Y
 float gz_dps = 0.0;              // Angular velocity around Z
 float roll_deg = 0.0;
 float pitch_deg = 0.0;
 float yaw_deg = 0.0;
-float origin_yaw_deg = 0.0;
 bool hasAcceleration = false;
 bool hasAngles = false;
 bool isCalibrated = false;
 
 float linear_ax = 0.0;          // Gravity-compensated X acceleration (m/s^2)
-float linear_ay = 0.0;          // Gravity-compensated Y acceleration (m/s^2)
-float linear_az = 0.0;          // Gravity-compensated Z acceleration (m/s^2)
-float world_ax = 0.0;            // X acceleration in the initial/world frame
+float linear_ax_with_gravity = 0.0; // X acceleration with gravity retained (m/s^2)
 float velocity_x = 0.0;         // Linear velocity (m/s)
 float position_x = 0.0;         // Signed displacement from virtual origin (m)
 float distance_x = 0.0;         // Total distance traveled along world X (m)
-bool stationary = false;
-uint8_t stationarySamples = 0;
+float velocity_x_with_gravity = 0.0;
+float position_x_with_gravity = 0.0;
+float distance_x_with_gravity = 0.0;
+bool stationary = true;
 
 // High-speed timing variables
 unsigned long lastTime_us = 0;
@@ -123,9 +128,7 @@ unsigned long lastPrint = 0;
 // 3. DRIFT SUPPRESSION THRESHOLDS
 // ============================================================================
 // Deadband threshold: ignores small noise fluctuations around the origin
-const float ACCEL_DEADBAND = 0.20; // in m/s^2
-const float MOVEMENT_THRESHOLD = 0.35; // Starts movement detection above this value
-const uint8_t STATIONARY_SAMPLE_COUNT = 5;
+const float ACCEL_THRESHOLD = 0.100; // Integrate each X stream only above this value (m/s^2)
 const float DAMPING_FACTOR = 0.95; // Dampens velocity to reduce integration runaway
 const float GRAVITY = 9.80665;     // m/s^2
 
@@ -194,19 +197,16 @@ void readWT61CPackets() {
  */
 void resetOrigin() {
   // Capture the current gravity-corrected reading as the zero baseline.
-  float roll_rad = roll_deg * PI / 180.0;
   float pitch_rad = pitch_deg * PI / 180.0;
   float gravity_ax = -GRAVITY * sinf(pitch_rad);
-  float gravity_ay = GRAVITY * sinf(roll_rad) * cosf(pitch_rad);
-  float gravity_az = GRAVITY * cosf(roll_rad) * cosf(pitch_rad);
   ax_baseline_mps2 = ax_raw * GRAVITY - gravity_ax;
-  ay_baseline_mps2 = ay_raw * GRAVITY - gravity_ay;
-  az_baseline_mps2 = az_raw * GRAVITY - gravity_az;
-  origin_yaw_deg = yaw_deg;
 
   velocity_x = 0.0;
   position_x = 0.0;
   distance_x = 0.0;
+  velocity_x_with_gravity = 0.0;
+  position_x_with_gravity = 0.0;
+  distance_x_with_gravity = 0.0;
   isCalibrated = true;
 
   Serial.println("\n=======================================================");
@@ -224,8 +224,12 @@ void handleRoot() {
 void handleStatus() {
   String json = "{";
   json += "\"moving\":" + String(stationary ? "false" : "true") + ",";
-  json += "\"position_cm\":" + String(position_x * 100.0, 2) + ",";
-  json += "\"distance_cm\":" + String(distance_x * 100.0, 2);
+  json += "\"position_with_gravity_cm\":" + String(position_x_with_gravity * 100.0, 2) + ",";
+  json += "\"distance_with_gravity_cm\":" + String(distance_x_with_gravity * 100.0, 2) + ",";
+  json += "\"position_without_gravity_cm\":" + String(position_x * 100.0, 2) + ",";
+  json += "\"distance_without_gravity_cm\":" + String(distance_x * 100.0, 2) + ",";
+  json += "\"acceleration_with_gravity_mps2\":" + String(linear_ax_with_gravity, 3) + ",";
+  json += "\"acceleration_without_gravity_mps2\":" + String(linear_ax, 3);
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -245,7 +249,7 @@ void setup() {
   lastTime_us = micros();
 
   Serial.println("\n--- WT61C Origin Distance Tracker ---");
-  Serial.println("Output: Acceleration X, Acceleration Y, Acceleration Z, Movement, Position X, Distance X");
+  Serial.println("Output: X acceleration, displacement, and distance with and without gravity");
   Serial.println("Type '0' or 'r' in Serial Monitor to set the current point as origin (0,0,0).\n");
 
   // ESP32 broadcasts its own hotspot; connect your phone to this network directly.
@@ -296,57 +300,32 @@ void loop() {
   // --------------------------------------------------------------------------
   if (isCalibrated) {
     // Remove the gravity component using roll and pitch, then subtract tare bias.
-    float roll_rad = roll_deg * PI / 180.0;
     float pitch_rad = pitch_deg * PI / 180.0;
     float gravity_ax = -GRAVITY * sinf(pitch_rad);
-    float gravity_ay = GRAVITY * sinf(roll_rad) * cosf(pitch_rad);
-    float gravity_az = GRAVITY * cosf(roll_rad) * cosf(pitch_rad);
+    linear_ax_with_gravity = current_ax_mps2 - ax_baseline_mps2;
     linear_ax = (current_ax_mps2 - gravity_ax) - ax_baseline_mps2;
-    linear_ay = (ay_raw * GRAVITY - gravity_ay) - ay_baseline_mps2;
-    linear_az = (az_raw * GRAVITY - gravity_az) - az_baseline_mps2;
 
-    // Keep the X displacement direction fixed to the heading at the origin.
-    float yaw_delta_rad = (yaw_deg - origin_yaw_deg) * PI / 180.0;
-    world_ax = linear_ax * cosf(yaw_delta_rad) - linear_ay * sinf(yaw_delta_rad);
+    // Integrate each X-axis stream independently only above the threshold.
+    bool withoutGravityActive = abs(linear_ax) > ACCEL_THRESHOLD;
+    bool withGravityActive = abs(linear_ax_with_gravity) > ACCEL_THRESHOLD;
 
-    // Use hysteresis so small noise does not keep movement_detected at 1.
-    bool belowStationaryThreshold = abs(linear_ax) < ACCEL_DEADBAND &&
-                                     abs(linear_ay) < ACCEL_DEADBAND &&
-                                     abs(linear_az) < ACCEL_DEADBAND;
-    bool aboveMovementThreshold = abs(linear_ax) > MOVEMENT_THRESHOLD ||
-                                  abs(linear_ay) > MOVEMENT_THRESHOLD ||
-                                  abs(linear_az) > MOVEMENT_THRESHOLD;
-
-    if (belowStationaryThreshold) {
-      if (stationarySamples < STATIONARY_SAMPLE_COUNT) {
-        stationarySamples++;
-      }
-      if (stationarySamples >= STATIONARY_SAMPLE_COUNT) {
-        stationary = true;
-      }
+    if (withoutGravityActive) {
+      velocity_x += linear_ax * dt;
+      position_x += velocity_x * dt;
+      distance_x += abs(velocity_x * dt);
     } else {
-      stationarySamples = 0;
-      if (aboveMovementThreshold) {
-        stationary = false;
-      }
-    }
-
-    // Deadband & Zero-Velocity Update (ZUPT)
-    if (stationary) {
-      linear_ax = 0.0;
-      linear_ay = 0.0;
-      linear_az = 0.0;
-      world_ax = 0.0;
       velocity_x = 0.0;
-    } else {
-      // First Integration: Acceleration -> Velocity
-      velocity_x += world_ax * dt;
-      velocity_x *= DAMPING_FACTOR;
     }
 
-    // Second Integration: Velocity -> Displacement from Origin
-    position_x += velocity_x * dt;
-    distance_x += abs(velocity_x * dt);
+    if (withGravityActive) {
+      velocity_x_with_gravity += linear_ax_with_gravity * dt;
+      position_x_with_gravity += velocity_x_with_gravity * dt;
+      distance_x_with_gravity += abs(velocity_x_with_gravity * dt);
+    } else {
+      velocity_x_with_gravity = 0.0;
+    }
+
+    stationary = !withoutGravityActive && !withGravityActive;
   }
 
   // --------------------------------------------------------------------------
@@ -354,9 +333,9 @@ void loop() {
   // --------------------------------------------------------------------------
   if (millis() - lastPrint > 100) {
     lastPrint = millis();
-    Serial.printf("Acceleration X: %+.3f m/s^2 | Acceleration Y: %+.3f m/s^2 | Acceleration Z: %+.3f m/s^2 | Movement: %s | Position X: %+.2f cm | Distance X: %+.2f cm\n",
-            linear_ax, linear_ay, linear_az,
-            stationary ? "NO (0)" : "YES (1)", position_x * 100.0 * 100.0,
-            distance_x * 100.0 * 100.0);
+            Serial.printf("X no gravity: %+.3f m/s^2 | Displacement: %+.2f cm | Distance: %.2f cm | X with gravity: %+.3f m/s^2 | Displacement: %+.2f cm | Distance: %.2f cm\n",
+              linear_ax, position_x * 100.0, distance_x * 100.0,
+              linear_ax_with_gravity, position_x_with_gravity * 100.0,
+              distance_x_with_gravity * 100.0);
   }
 }
